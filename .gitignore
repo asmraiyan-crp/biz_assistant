@@ -1,0 +1,41 @@
+# Django
+*.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+*.sqlite3
+db.sqlite3
+db.sqlite3-journal
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# Mac
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Media / Uploaded files
+media/
+staticfiles/
+
+# Node / Frontend (when added)
+node_modules/
+build/
+dist/
