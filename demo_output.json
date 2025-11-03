@@ -1,0 +1,86 @@
+{
+  "metrics": {
+    "mae": 8.525333333333334,
+    "r2": -0.18633921136173792,
+    "prophet_models": 0
+  },
+  "results": {
+    "Headphones": {
+      "forecast_conf": {
+        "mean": 29.542117872383677,
+        "std": 7.955478094264064,
+        "p10": 19.356288190619672,
+        "p90": 39.377475651689835
+      },
+      "simulation": {
+        "mean": 29.63637289556788,
+        "std": 7.860264464956413,
+        "p10": 20.02696995602306,
+        "p90": 39.55126760694037,
+        "VaR90": 20.02696995602306,
+        "CVaR90": 15.312496487160386
+      },
+      "current_stock": 40,
+      "p_stockout": 0.09367096287052734,
+      "sentiment": -0.3529411764705882
+    },
+    "Mouse": {
+      "forecast_conf": {
+        "mean": 34.66028949908089,
+        "std": 7.719914059615285,
+        "p10": 24.515816495996667,
+        "p90": 44.50060129874881
+      },
+      "simulation": {
+        "mean": 34.49162663992291,
+        "std": 9.211900280599869,
+        "p10": 22.47962371996846,
+        "p90": 46.176552041584856,
+        "VaR90": 22.47962371996846,
+        "CVaR90": 17.618325441143625
+      },
+      "current_stock": 50,
+      "p_stockout": 0.046137707917274895,
+      "sentiment": 0.8999999999999999
+    },
+    "Keyboard": {
+      "forecast_conf": {
+        "mean": 28.603186779108533,
+        "std": 6.930079353389746,
+        "p10": 19.48195029322895,
+        "p90": 37.564714202413015
+      },
+      "simulation": {
+        "mean": 28.510156356912656,
+        "std": 7.5485564438248165,
+        "p10": 19.13278451725098,
+        "p90": 38.02234826217544,
+        "VaR90": 19.13278451725098,
+        "CVaR90": 14.874867511191464
+      },
+      "current_stock": 18,
+      "p_stockout": 0.9180902534226721,
+      "sentiment": 0.6000000000000001
+    },
+    "Speaker": {
+      "forecast_conf": {
+        "mean": 23.690149215645537,
+        "std": 6.044768112188472,
+        "p10": 15.926886672548415,
+        "p90": 31.74147915057381
+      },
+      "simulation": {
+        "mean": 23.49028009968877,
+        "std": 6.142238982966196,
+        "p10": 15.902477991552082,
+        "p90": 31.230954815935245,
+        "VaR90": 15.902477991552082,
+        "CVaR90": 12.517485152445422
+      },
+      "current_stock": 10,
+      "p_stockout": 0.9859652305557596,
+      "sentiment": 0.5454545454545454
+    }
+  },
+  "summary": "Headphones: forecast mean 29.6, risk_index 0.00, P(stockout) 0.09.\nMouse: forecast mean 34.5, risk_index 0.00, P(stockout) 0.05.\nKeyboard: forecast mean 28.5, risk_index 0.37, P(stockout) 0.92.\nSpeaker: forecast mean 23.5, risk_index 0.57, P(stockout) 0.99.\nCheck high-risk products and consider reordering.\nInvestigate negative reviews for products with low sentiment."
+}

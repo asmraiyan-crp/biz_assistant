@@ -1,0 +1,20 @@
+# Main App & Data
+streamlit
+pandas
+
+# AI & LLM
+google-generativeai
+sentence-transformers
+scikit-learn
+# openai (optional, no longer needed)
+
+# Forecasting & Stats
+prophet
+scipy
+
+# Sentiment
+vaderSentiment
+
+fastapi
+uvicorn[standard]
+plotly
