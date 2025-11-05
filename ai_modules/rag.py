@@ -18,7 +18,8 @@ class SimpleRAG:
 
         if USE_ST:
             try:
-                self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+                # Force CPU to prevent CUDA errors
+                self.embedder = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
             except Exception:
                 print("Warning: Failed to load SentenceTransformer, falling back to TF-IDF.")
                 self.embedder = None
@@ -43,34 +44,48 @@ class SimpleRAG:
     def add(self, doc):
         """Adds a document, but does not re-index. Call index() again."""
         self.documents.append(doc)
-        # Note: In a real system, you'd want an incremental index
-        # For this simple class, user must call .index() again.
         self.embeddings = None  # Invalidate old index
         self.tfidf = None  # Invalidate old index
 
     def query(self, q, top_k=3):
-        # ROBUSTNESS FIX: Ensure index has been called
+        # Robustness check
         if self.embeddings is None and self.tfidf is None:
             if not self.documents:
                 return []  # No documents, return empty list
             print("Warning: .index() has not been called. Indexing now.")
             self.index()
-            # If still None (e.g., no documents), return
             if self.embeddings is None and self.tfidf is None:
                 return []
 
         if USE_ST and self.embedder and self.embeddings is not None:
             qv = self.embedder.encode([q], convert_to_numpy=True)
             sims = (self.embeddings @ qv.T).squeeze()
-            # Handle case where self.embeddings is 1D (only one doc indexed)
             if sims.ndim == 0:
                 sims = np.array([sims])
 
             idx = sims.argsort()[::-1][:top_k]
-            return [self.documents[i] for i in idx if sims[i] > 0]
+
+            # --- FIX: Add the score to the result ---
+            results = []
+            for i in idx:
+                if sims[i] > 0:
+                    doc = self.documents[i].copy()  # Make a copy
+                    doc['score'] = float(sims[i])  # Add the score
+                    results.append(doc)
+            return results
+            # --- END FIX ---
         else:
             # Fallback to TF-IDF
             qv = self.vectorizer.transform([q])
             sims = linear_kernel(qv, self.tfidf).flatten()
             idx = sims.argsort()[::-1][:top_k]
-            return [self.documents[i] for i in idx if sims[i] > 0]
+
+            # --- FIX: Add the score to the result ---
+            results = []
+            for i in idx:
+                if sims[i] > 0:
+                    doc = self.documents[i].copy()  # Make a copy
+                    doc['score'] = float(sims[i])  # Add the score
+                    results.append(doc)
+            return results
+            # --- END FIX ---

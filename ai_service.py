@@ -1,32 +1,35 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Dict, Any
+import uvicorn
 import pandas as pd
+import numpy as np
+import traceback
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any
 from datetime import datetime, timedelta
 
-# Import all your AI modules
-from ai_modules.data_loader import load_sales_data, load_reviews
+# Import all AI modules
 from ai_modules.forecast import ForecastModel
-from ai_modules.simulation import monte_carlo
+from ai_modules.simulation import monte_carlo_simulation
 from ai_modules.risk import stockout_prob
 from ai_modules.sentiment import Sentiment
 from ai_modules.rag import SimpleRAG
-from ai_modules.llm import llm_summary
-from ai_modules.explain import explain_simple  # Import explain_simple
+# --- FIX: Import both LLM functions ---
+from ai_modules.llm import llm_summary, llm_chat
+# --- END FIX ---
+from ai_modules.explain import explain_simple
 
-app = FastAPI(title='Business AI Assistant - Risk-style')
+# --- FastAPI App & Pydantic Models ---
 
+app = FastAPI(title='Business AI Assistant - Prototype (Advanced)')
 
-# --- Pydantic Models ---
-# These define the structure of your API requests
 
 class SalesRow(BaseModel):
     date: str
     product_name: str
     quantity_sold: int
-    price: float
-    total_revenue: float
-    stock_quantity: int = 0
+    stock_quantity: int
+    avg_temp_c: float = 15.0
+    rainfall_mm: float = 0.0
 
 
 class ReviewRow(BaseModel):
@@ -36,228 +39,235 @@ class ReviewRow(BaseModel):
 
 class ForecastRequest(BaseModel):
     sales: List[SalesRow]
-    reviews: List[ReviewRow] = []  # Add reviews to the main request
-    products: List[str]
-    scenario: Dict[str, Any] = None
+    reviews: List[ReviewRow]
+    scenario: Dict[str, Any] = Field(default_factory=dict)
 
 
 class QueryRequest(BaseModel):
+    reviews: List[ReviewRow]
     query: str
-    reviews: List[ReviewRow]  # Pass reviews for RAG
 
 
-# --- Helper Functions ---
-# (We can move logic out of endpoints to make them cleaner)
+# --- Helper Functions (no change) ---
 
 def _build_sales_df(sales_rows: List[SalesRow]) -> pd.DataFrame:
-    """Converts sales rows into a processed DataFrame."""
+    if not sales_rows:
+        raise ValueError("Sales data is empty")
     df = pd.DataFrame([r.dict() for r in sales_rows])
-    df['date'] = pd.to_datetime(df['date'])
-
-    # --- THIS IS THE FIX ---
-    # The model's train() method requires these columns.
-    if 'day_of_week' not in df.columns:
-        df['day_of_week'] = df['date'].dt.dayofweek
-    if 'month' not in df.columns:
-        df['month'] = df['date'].dt.month
-    # --- END FIX ---
-
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date'])
     return df
 
 
 def _build_reviews_df(review_rows: List[ReviewRow]) -> pd.DataFrame:
-    """Converts review rows into a DataFrame."""
+    if not review_rows:
+        return pd.DataFrame(columns=['product_name', 'review_text'])
     return pd.DataFrame([r.dict() for r in review_rows])
 
 
-# --- API Endpoints ---
-
-@app.post('/simulate')
-def simulate(req: ForecastRequest):
-    """
-    (Internal) Trains forecast model and runs simulation.
-    This is called by other endpoints.
-    """
+def _load_holidays() -> pd.DataFrame:
     try:
-        df = _build_sales_df(req.sales)  # Use helper
-
-        model = ForecastModel()
-        metrics = model.train(df)
-
-        out = {}
-        # Predict for 7 days from now
-        date_str = (datetime.utcnow() + timedelta(days=7)).date().isoformat()
-
-        for p in req.products:
-            try:
-                fc = model.predict_with_confidence(p, date_str)
-            except Exception:
-                fc = {'mean': 0.0, 'std': 0.0}
-
-            black = req.scenario.get('black_swan') if req.scenario else None
-            sim = monte_carlo(fc.get('mean', 0.0), variability=0.25, runs=2000, black_swan=black)
-
-            current_rows = df[df['product_name'] == p]
-            cur_stock = int(current_rows['stock_quantity'].iloc[-1]) if not current_rows.empty else 0
-
-            p_stockout = stockout_prob(sim, cur_stock)
-
-            out[p] = {'forecast_conf': fc, 'simulation': sim, 'current_stock': cur_stock, 'p_stockout': p_stockout}
-
-        return {'status': 'ok', 'metrics': metrics, 'results': out}
-
-    except KeyError as e:
-        # This will catch the 'day_of_week' error if it persists
-        raise HTTPException(status_code=500, detail=f"Missing column in DataFrame: {str(e)}")
+        holidays_df = pd.read_csv('data/holidays_bd.csv', parse_dates=['ds'])
+        print("Successfully loaded 'data/holidays_bd.csv'")
+        return holidays_df
+    except FileNotFoundError:
+        print("Warning: 'data/holidays_bd.csv' not found. Continuing without holiday features.")
+        return None
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error loading holidays: {e}")
+        return None
 
 
-@app.post('/risk')
-def risk(req: ForecastRequest):
+# --- Main Summary Endpoint (no change) ---
+
+@app.post("/summary")
+async def get_full_summary(req: ForecastRequest):
     """
-    (Internal) Calculates risk, sentiment, and reasons.
-    This is called by other endpoints.
+    Main endpoint that runs the full pipeline with advanced features
+    and returns a 7-day cumulative forecast.
     """
     try:
-        # 1. Get simulation results
-        sim_resp = simulate(req)
-        results = sim_resp['results']
-
-        # 2. Process review data for sentiment
+        # --- 1. Load & Prep Data ---
+        sales_df = _build_sales_df(req.sales)
         reviews_df = _build_reviews_df(req.reviews)
+        holidays_df = _load_holidays()
+        products = sales_df['product_name'].unique().tolist()
+
+        # --- 2. Train Models ---
+        model = ForecastModel()
+
+        if holidays_df is not None:
+            holiday_dates = set(holidays_df['ds'].dt.date)
+            sales_df['is_holiday'] = sales_df['date'].dt.date.isin(holiday_dates).astype(int)
+        else:
+            sales_df['is_holiday'] = 0
+
+        model.train(sales_df, holidays_df=holidays_df)
+
         sentiment_model = Sentiment()
 
-        products = []
-        for p, info in results.items():
+        rag_docs = [{'id': str(i), 'text': r['review_text'], 'meta': {'product': r['product_name']}}
+                    for i, r in reviews_df.iterrows()]
+        rag_model = SimpleRAG(documents=rag_docs)
+        rag_model.index()
+
+        # --- 3. Run 7-Day Risk Analysis ---
+        current_date = sales_df['date'].max().date()
+        print(f"Forecasting 7 days starting from: {current_date + timedelta(days=1)}")
+
+        black_swan = req.scenario.get('black_swan')
+
+        product_insights = []
+        all_evidence = []
+
+        stock_levels = {}
+        last_weather = {}
+        for p in products:
+            current_rows = sales_df[sales_df['product_name'] == p].sort_values(by='date')
+            if not current_rows.empty:
+                stock_levels[p] = int(current_rows['stock_quantity'].iloc[-1])
+                last_weather[p] = {
+                    'avg_temp_c': current_rows['avg_temp_c'].iloc[-1],
+                    'rainfall_mm': current_rows['rainfall_mm'].iloc[-1]
+                }
+            else:
+                stock_levels[p] = 0
+                last_weather[p] = {'avg_temp_c': 15.0, 'rainfall_mm': 0.0}
+
+        for p in products:
+            daily_risk_forecast = []
+            product_cumulative_demand = 0.0
+            product_initial_stock = stock_levels.get(p, 0)
+            effective_stock = product_initial_stock
+
+            for day in range(1, 8):
+                date_to_forecast = current_date + timedelta(days=day)
+                date_str = date_to_forecast.isoformat()
+
+                future_external_factors = {
+                    'avg_temp_c': last_weather[p]['avg_temp_c'],
+                    'rainfall_mm': last_weather[p]['rainfall_mm'],
+                    'is_holiday': 1 if (holidays_df is not None and date_to_forecast in holiday_dates) else 0
+                }
+
+                fc = model.predict_with_confidence(p, date_str, external_factors=future_external_factors)
+                sim = monte_carlo_simulation(fc.get('mean', 0.0), variability=0.25, runs=2000, black_swan=black_swan)
+                p_stockout = stockout_prob(sim, effective_stock)
+
+                daily_demand = sim.get('mean', 0.0)
+                projected_stock_end = max(0, effective_stock - daily_demand)
+
+                daily_risk_forecast.append({
+                    'product': p,
+                    'day': day,
+                    'date': date_str,
+                    'forecast_demand': round(daily_demand, 2),
+                    'projected_stock_end': round(projected_stock_end, 2),
+                    'stockout_prob': p_stockout
+                })
+
+                effective_stock = projected_stock_end
+                product_cumulative_demand += daily_demand
+
+            final_p_stockout = max(d['stockout_prob'] for d in daily_risk_forecast)
+            total_7_day_demand = product_cumulative_demand
+
+            prod_reviews = reviews_df[reviews_df['product_name'] == p]['review_text']
+            sentiment_score = float(prod_reviews.apply(sentiment_model.score).mean()) if not prod_reviews.empty else 0.0
+
             prod_insight = {
                 'product_name': p,
-                'forecast_mean': info['forecast_conf'].get('mean', 0.0),
-                'simulation_mean': info['simulation'].get('mean', 0.0),
-                'std': info['simulation'].get('std', 0.0),
-                'p_stockout': info.get('p_stockout', 0.0),
-                'current_stock': info.get('current_stock', 0)
+                'forecast_mean': total_7_day_demand,
+                'simulation_mean': total_7_day_demand,
+                'p_stockout': final_p_stockout,
+                'risk_index': final_p_stockout,
+                'current_stock': product_initial_stock,
+                'sentiment': sentiment_score,
+                'daily_risk_forecast': daily_risk_forecast
             }
 
-            # Calculate Risk Index
-            prod_insight['risk_index'] = max(0.0,
-                                             (prod_insight['simulation_mean'] - prod_insight['current_stock']) / max(
-                                                 1.0, prod_insight['simulation_mean']))
+            prod_insight['reasons'] = explain_simple(prod_insight)
+            product_insights.append(prod_insight)
 
-            # Calculate Sentiment
-            prod_reviews = reviews_df[reviews_df['product_name'] == p][
-                'review_text'] if not reviews_df.empty else pd.Series([])
-            if not prod_reviews.empty:
-                prod_insight['sentiment'] = float(prod_reviews.apply(sentiment_model.score).mean())
-            else:
-                prod_insight['sentiment'] = 0.0
+            if sentiment_score < -0.3:
+                hits = rag_model.query(f"bad reviews for {p}", top_k=1)
+                all_evidence.extend([h['text'] for h in hits])
 
-            # Get Reasons
-            prod_insight['reasons'] = explain_simple(prod_insight)  # Use explain module
-
-            products.append(prod_insight)
-
-        # 3. Setup RAG for evidence
-        if not reviews_df.empty:
-            docs = [{'id': str(i), 'text': row['review_text'], 'meta': {'product': row['product_name']}} for i, row in
-                    reviews_df.iterrows()]
-        else:
-            docs = []
-
-        rag = SimpleRAG(documents=docs);
-        rag.index()
-        evidence = []
-        for prod in products:
-            if prod['sentiment'] < -0.2:  # Find evidence for negative sentiment
-                hits = rag.query(f"bad reviews for {prod['product_name']}", top_k=1)
-                evidence += [h['text'] for h in hits]
-
-        return {'status': 'ok', 'risk_products': products, 'evidence': evidence}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post('/recommend')
-def recommend(req: ForecastRequest):
-    """
-    (Internal) Generates reorder recommendations.
-    This is called by the /summary endpoint.
-    """
-    try:
-        r = risk(req)  # Get risk analysis
-        products = r['risk_products']
-
+        # --- 4. Get Recommendations (no change) ---
         recs = []
-        for p in products:
+        for p in product_insights:
             name = p['product_name']
-            risk_idx = p.get('risk_index', 0.0)
-            mean = p.get('simulation_mean', 0.0)
-            cur_stock = p.get('current_stock', 0)
+            risk_idx = p['risk_index']
+            mean_demand = p['simulation_mean']
+            cur_stock = p['current_stock']
+            qty_needed = max(0, int(round(mean_demand - cur_stock)))
 
-            if risk_idx >= 0.6:
-                qty = max(1, int(round(mean - cur_stock)))
-                recs.append({'product': name, 'action': 'reorder', 'quantity': qty, 'priority': 'high',
+            if risk_idx >= 0.60:
+                recs.append({'product': name, 'action': 'reorder', 'quantity': qty_needed, 'priority': 'high',
                              'reason': f'High Risk ({risk_idx:.0%})'})
-            elif risk_idx >= 0.3:
-                qty = max(0, int(round(mean - cur_stock)))
-                recs.append({'product': name, 'action': 'reorder', 'quantity': qty, 'priority': 'medium',
+            elif risk_idx >= 0.20:
+                recs.append({'product': name, 'action': 'reorder', 'quantity': qty_needed, 'priority': 'medium',
                              'reason': f'Medium Risk ({risk_idx:.0%})'})
             else:
                 recs.append({'product': name, 'action': 'no_action', 'quantity': 0, 'priority': 'low',
-                             'reason': 'Stock sufficient'})
+                             'reason': f'Low Risk ({risk_idx:.0%})'})
 
-        return {'status': 'ok', 'recommendations': recs}
+        # --- 5. Generate LLM Summary (no change) ---
+        summary = llm_summary({'products': product_insights}, all_evidence)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post('/summary')
-def summary(req: ForecastRequest):
-    """
-    *** MAIN ENDPOINT ***
-    Runs the full pipeline: risk, recommendations, and LLM summary.
-    """
-    try:
-        risk_resp = risk(req)
-        rec_resp = recommend(req)
-
-        # Consolidate data for the LLM
-        insights = {'products': risk_resp['risk_products']}
-        evidence = risk_resp['evidence']
-
-        summary_text = llm_summary(insights, evidence)
-
+        # --- 6. Return Combined Response (no change) ---
         return {
             'status': 'ok',
-            'summary_text': summary_text,
-            'recommendations': rec_resp['recommendations'],
-            'risk_products': risk_resp['risk_products']
+            'summary': summary,
+            'recommendations': recs,
+            'risk_analysis': product_insights,
+            'model_accuracy': model.accuracy
         }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print("--- ERROR IN /summary ---")
+        traceback.print_exc()
+        print("-------------------------")
+        raise HTTPException(status_code=500, detail=f"Error in /summary: {str(e)}")
 
 
+# --- *** UPGRADED CHATBOT ENDPOINT *** ---
 @app.post('/query')
 def query(req: QueryRequest):
     """
-    Runs an ad-hoc RAG query against the review data.
+    Endpoint to query the review documents using RAG.
+    It now finds context and passes it to the LLM for a natural answer.
     """
     try:
         reviews_df = _build_reviews_df(req.reviews)
         if reviews_df.empty:
-            return {'status': 'ok', 'hits': ['No review data provided.']}
+            return {'status': 'ok', 'answer': "Please upload a reviews file to chat about it."}
 
-        docs = [{'id': str(i), 'text': row['review_text'], 'meta': {'product': row['product_name']}} for i, row in
-                reviews_df.iterrows()]
+        # 1. Build the RAG index
+        rag_docs = [{'id': str(i), 'text': r['review_text'], 'meta': {'product': r['product_name']}}
+                    for i, r in reviews_df.iterrows()]
 
-        rag = SimpleRAG(documents=docs);
-        rag.index()
-        hits = rag.query(req.query, top_k=4)
+        rag_model = SimpleRAG(documents=rag_docs)
+        rag_model.index()
 
-        return {'status': 'ok', 'hits': hits}
+        # 2. Retrieve relevant documents (context)
+        hits = rag_model.query(req.query, top_k=5)  # Get top 5 snippets
+        context_snippets = [f"Review for {h['meta'].get('product', 'N/A')}: \"{h['text']}\"" for h in hits]
+
+        # 3. Generate an answer using the LLM
+        answer = llm_chat(req.query, context_snippets)
+
+        # 4. Return the final answer
+        return {'status': 'ok', 'answer': answer, 'context': context_snippets}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"--- ERROR IN /query ---")
+        traceback.print_exc()
+        print("-------------------------")
+        raise HTTPException(status_code=500, detail=f"Error in /query: {str(e)}")
 
+
+# --- Main execution (no change) ---
+if __name__ == "__main__":
+    print("Starting AI Service on http://127.0.0.1:5000")
+    uvicorn.run("ai_service:app", host="127.0.0.1", port=5000, reload=True)

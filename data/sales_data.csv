@@ -1,0 +1,7 @@
+date,product_name,quantity_sold,price,total_revenue,stock_quantity,avg_temp_c,rainfall_mm
+2025-10-01,Headphones,28,1200,33600,122,29,0
+2025-10-02,Headphones,33,1200,39600,89,30,0
+2025-10-03,Headphones,39,1200,46800,50,30,0
+2025-10-04,Headphones,43,1200,51600,7,28,5
+2025-10-05,Headphones,7,1200,8400,0,27,10
+2025-10-06,Headphones,0,1200,0,100,28,0

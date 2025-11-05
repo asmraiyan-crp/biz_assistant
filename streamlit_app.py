@@ -2,142 +2,209 @@ import streamlit as st
 import pandas as pd
 import requests
 import json
-import io
+import traceback
+import numpy as np
 
-st.set_page_config(page_title='AI Business Assistant (Prototype)', layout='wide')
-st.title('🤖 AI Business Assistant - Prototype (Risk-style)')
+# --- Page Config ---
+st.set_page_config(page_title='AI Business Assistant', layout='wide')
+st.title('🤖 AI Business Assistant - Prototype')
 
-# --- Sidebar for Inputs ---
-st.sidebar.header('Upload Data')
-sales_file = st.sidebar.file_uploader('Upload Sales CSV', type=['csv'])
-reviews_file = st.sidebar.file_uploader('Upload Reviews CSV', type=['csv'])
+# --- Sidebar (Inputs) ---
+with st.sidebar:
+    st.header('Upload Data')
+    sales_file = st.file_uploader('Upload Sales CSV', type=['csv'])
+    reviews_file = st.file_uploader('Upload Reviews CSV', type=['csv'])
 
-api_url = st.sidebar.text_input('AI Service URL', 'http://localhost:5000')
+    api_url = st.text_input('AI Service URL', 'http://localhost:5000')
 
-st.sidebar.markdown("---")
-# Use a more descriptive button label
-run_button = st.sidebar.button('Run Full Analysis', type="primary")
+    run_button = st.button('Run 7-Day Forecast', type="primary", use_container_width=True)
 
-# --- Main Page Layout ---
-if sales_file is None or reviews_file is None:
+# --- Main Page (Outputs) ---
+
+if not sales_file or not reviews_file:
     st.info('Please upload both Sales and Reviews CSV files to begin.')
-else:
-    # Load data for display and payload
-    try:
-        # Read files into memory
-        sales_data_bytes = sales_file.getvalue()
-        reviews_data_bytes = reviews_file.getvalue()
+    # Show data tables on upload (before running)
+    if sales_file:
+        st.subheader("Uploaded Sales Data (Sample)")
+        st.dataframe(pd.read_csv(sales_file, parse_dates=['date']).head(), use_container_width=True)
+    if reviews_file:
+        st.subheader("Uploaded Reviews Data (Sample)")
+        st.dataframe(pd.read_csv(reviews_file).head(), use_container_width=True)
 
-        # Read into DataFrames
-        sales_df = pd.read_csv(io.BytesIO(sales_data_bytes), parse_dates=['date'])
-        reviews_df = pd.read_csv(io.BytesIO(reviews_data_bytes))
+if run_button and sales_file and reviews_file:
+    with st.spinner('Running full 7-day analysis... This may take a moment.'):
+        try:
+            # --- 1. Read and Prepare Data ---
+            sales_file.seek(0)
+            reviews_file.seek(0)
 
-        st.subheader('Uploaded Sales Data (Sample)')
-        st.dataframe(sales_df.head())
+            sales_df = pd.read_csv(sales_file)
+            reviews_df = pd.read_csv(reviews_file)
 
-        st.subheader('Uploaded Reviews Data (Sample)')
-        st.dataframe(reviews_df.head())
+            sales_df['date'] = pd.to_datetime(sales_df['date'], errors='coerce')
 
-        if run_button:
-            # Build the payload
-            products = sales_df['product_name'].unique().tolist()
+            sales_df = sales_df.replace({np.nan: None})
+            reviews_df = reviews_df.replace({np.nan: None})
 
-            # --- THIS IS THE FIX ---
-            # Create a copy to avoid changing the displayed dataframe
-            sales_df_payload = sales_df.copy()
-            # Convert Timestamp objects to standard strings BEFORE sending
-            sales_df_payload['date'] = sales_df_payload['date'].astype(str)
-            # --- END FIX ---
+            if 'date' in sales_df.columns:
+                sales_df['date'] = sales_df['date'].astype(str)
 
-            sales_payload = sales_df_payload.to_dict(orient='records')
+            sales_payload = sales_df.to_dict(orient='records')
             reviews_payload = reviews_df.to_dict(orient='records')
 
             payload = {
-                'sales': sales_payload,
-                'reviews': reviews_payload,
-                'products': products
+                "sales": sales_payload,
+                "reviews": reviews_payload,
+                "scenario": {}
             }
 
-            with st.spinner('Calling AI Service... This may take a moment (training models)...'):
+            # --- 2. Call AI Service ---
+            resp = requests.post(
+                f"{api_url}/summary",
+                json=payload,
+                timeout=180  # 3 minute timeout
+            )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                st.success('Analysis Complete!')
+
+                # --- 3. Display Results ---
+
+                # AI Summary
+                st.subheader('📈 AI-Generated 7-Day Summary')
+                st.markdown(data.get('summary', 'No summary generated.'))
+
+                # Reorder Recommendations
+                st.subheader('📦 7-Day Reorder Recommendations')
+                recs_df = pd.DataFrame(data.get('recommendations', []))
+                if not recs_df.empty:
+                    st.dataframe(recs_df, use_container_width=True)
+                else:
+                    st.info("No reorder recommendations at this time.")
+
+                # Full Risk Analysis
+                st.subheader('⚠️ Product 7-Day Risk & Sentiment')
+                risk_df = pd.DataFrame(data.get('risk_analysis', []))
+
+                if not risk_df.empty:
+                    risk_df_display = risk_df.copy()
+                    risk_df_display['risk_index'] = risk_df_display['risk_index'].map('{:.1%}'.format)
+                    risk_df_display['sentiment'] = risk_df_display['sentiment'].map('{:.2f}'.format)
+                    risk_df_display['forecast_mean'] = risk_df_display['forecast_mean'].map('{:.0f}'.format)
+                    risk_df_display['current_stock'] = risk_df_display['current_stock'].map('{:.0f}'.format)
+
+                    st.dataframe(risk_df_display[[
+                        'product_name',
+                        'risk_index',  # Max 7-day risk
+                        'sentiment',
+                        'forecast_mean',  # 7-day total demand
+                        'current_stock',
+                        'reasons'
+                    ]], use_container_width=True)
+
+                    # --- 7-DAY FORECAST SECTION ---
+                    st.subheader("🗓️ 7-Day Daily Stockout Forecast")
+
+                    product_list = risk_df['product_name'].tolist()
+                    selected_product = st.selectbox("Select product to see daily forecast:", product_list)
+
+                    if selected_product:
+                        product_data = next((item for item in data.get('risk_analysis', []) if
+                                             item["product_name"] == selected_product), None)
+
+                        if product_data and 'daily_risk_forecast' in product_data:
+                            daily_df = pd.DataFrame(product_data['daily_risk_forecast'])
+
+                            daily_df_display = daily_df.copy()
+                            daily_df_display['stockout_prob_pct'] = (daily_df['stockout_prob'] * 100).round(1).astype(
+                                str) + '%'
+                            daily_df_display['forecast_demand'] = daily_df_display['forecast_demand'].map(
+                                '{:.1f}'.format)
+                            daily_df_display['projected_stock_end'] = daily_df_display['projected_stock_end'].map(
+                                '{:.1f}'.format)
+
+                            st.dataframe(daily_df_display[[
+                                'day',
+                                'date',
+                                'forecast_demand',
+                                'projected_stock_end',
+                                'stockout_prob_pct'
+                            ]], use_container_width=True)
+
+                # Raw JSON
+                with st.expander("Show Raw JSON Response"):
+                    st.json(data)
+
+            else:
+                st.error(f"Error from AI Service (HTTP {resp.status_code}):")
+                st.json(resp.json())
+
+        except requests.exceptions.ConnectionError:
+            st.error(f"Connection Error: Could not connect to the AI service at {api_url}. Is the backend running?")
+        except Exception as e:
+            st.error(f"An error occurred in the Streamlit app: {e}")
+            traceback.print_exc()
+
+# --- *** UPGRADED CHATBOT UI *** ---
+st.markdown("---")
+st.subheader("💬 AI Co-pilot (Chat about Reviews)")
+
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Ask me anything about your customer reviews!"}]
+
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Accept user input
+if prompt := st.chat_input("What are the main complaints about headphones?"):
+    if not reviews_file:
+        st.error("Please upload a Reviews CSV file first to chat about it.")
+    else:
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        # Display user message in chat message container
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Display assistant response in chat message container
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
                 try:
-                    # Call the /summary endpoint to get the full report
-                    resp = requests.post(api_url + '/summary', json=payload, timeout=120)
+                    # Re-read file for a fresh state
+                    reviews_file.seek(0)
+                    reviews_df = pd.read_csv(reviews_file)
+                    reviews_df = reviews_df.replace({np.nan: None})
+                    reviews_payload = reviews_df.to_dict(orient='records')
+
+                    payload = {
+                        "query": prompt,
+                        "reviews": reviews_payload
+                    }
+
+                    resp = requests.post(
+                        f"{api_url}/query",
+                        json=payload,
+                        timeout=60
+                    )
 
                     if resp.status_code == 200:
                         data = resp.json()
-                        st.success('Analysis Complete!')
+                        answer = data.get("answer", "I'm sorry, I couldn't get a valid answer.")
+                        st.markdown(answer)
+                        # Add assistant response to chat history
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
 
-                        # --- Display Results ---
-                        st.subheader('📈 AI-Generated Summary')
-                        st.markdown(data.get('summary_text', 'No summary available.'))
-
-                        st.subheader('📦 Reorder Recommendations')
-                        rec_df = pd.DataFrame(data.get('recommendations', []))
-                        st.dataframe(rec_df, use_container_width=True)
-
-                        st.subheader('⚠️ Product Risk & Sentiment Analysis')
-                        risk_df = pd.DataFrame(data.get('risk_products', []))
-
-                        # Format columns for better display
-                        if not risk_df.empty:
-                            risk_df_display = risk_df.copy()
-                            risk_df_display['p_stockout'] = risk_df_display['p_stockout'].map('{:.1%}'.format)
-                            risk_df_display['risk_index'] = risk_df_display['risk_index'].map('{:.1%}'.format)
-                            risk_df_display['sentiment'] = risk_df_display['sentiment'].map('{:.2f}'.format)
-                            risk_df_display['forecast_mean'] = risk_df_display['forecast_mean'].map('{:.1f}'.format)
-                            risk_df_display['simulation_mean'] = risk_df_display['simulation_mean'].map('{:.1f}'.format)
-
-                            st.dataframe(risk_df_display[[
-                                'product_name',
-                                'risk_index',
-                                'p_stockout',
-                                'sentiment',
-                                'forecast_mean',
-                                'current_stock',
-                                'reasons'
-                            ]], use_container_width=True)
-
-                        with st.expander("Show Raw JSON Response"):
-                            st.json(data)
-
+                        # Optionally show the context used
+                        with st.expander("Show context used"):
+                            st.json(data.get("context", []))
                     else:
                         st.error(f"Error from AI Service (HTTP {resp.status_code}):")
-                        try:
-                            st.json(resp.json())
-                        except:
-                            st.text(resp.text)
+                        st.json(resp.json())
 
-                except requests.exceptions.RequestException as e:
-                    st.error(f'AI service connection error: {e}')
                 except Exception as e:
-                    st.error(f'An unexpected error occurred: {e}')
-
-    except Exception as e:
-        # This will catch the 'Timestamp' error if it happens during file read
-        st.error(f"Error reading or processing files: {e}")
-
-st.markdown('---')
-st.subheader('Ad-hoc Query')
-query_text = st.text_input('Ask about product reviews:')
-
-if st.button('Run Query'):
-    if reviews_file is None:
-        st.error('Upload reviews CSV first')
-    else:
-        # We don't need to convert dates for the query payload
-        reviews_payload = reviews_df.to_dict(orient='records')
-        payload = {'query': query_text, 'reviews': reviews_payload}
-
-        with st.spinner('Querying reviews...'):
-            try:
-                resp = requests.post(api_url + '/query', json=payload, timeout=60)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    st.success('Query complete')
-                    st.write(data.get('hits', []))
-                else:
-                    st.error(f"Error from AI Service (HTTP {resp.status_code}):")
-                    st.json(resp.json())
-            except Exception as e:
-                st.error(f'AI service error: {e}')
-
+                    st.error(f"An error occurred during query: {e}")
+                    traceback.print_exc()
